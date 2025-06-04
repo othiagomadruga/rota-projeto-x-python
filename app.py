@@ -41,12 +41,13 @@ def init_db():
         # Configurações SSL
         ssl_config = {}
         if ssl_mode == "REQUIRED":
-            # Para mysql-connector-python, ssl_verify_identity=True geralmente é suficiente para cloud providers como Aiven
+            # AQUI ESTÁ A MUDANÇA: Usando o caminho do certificado CA
+            # O Render vai encontrar 'ca.pem' se ele estiver na raiz do seu projeto
             ssl_config = {
-                'ssl_verify_identity': True,
-                # 'ssl_ca': '/path/to/ca.pem' # Opcional: Se Aiven exigir um certificado CA específico
+                'ssl_ca': 'ca.pem', # <--- APONTA PARA O ARQUIVO CA.PEM
+                'ssl_verify_identity': True, # Mantenha esta linha para verificar a identidade do servidor
             }
-            logging.info("SSL mode is REQUIRED. Configuring SSL for database connection.")
+            logging.info("SSL mode is REQUIRED. Configuring SSL for database connection with CA certificate.")
         elif ssl_mode:
             logging.warning(f"Unsupported SSL mode: {ssl_mode}. Connection might fail.")
         else:
@@ -82,13 +83,23 @@ def init_db():
         exit(1)
 
 # Inicia a conexão com o banco de dados quando o aplicativo começa
+# Esta chamada é feita uma vez na inicialização da aplicação
 init_db()
 
 # Rota GET para buscar um computador por device_id
 @app.route('/computadores/<string:device_id>', methods=['GET'])
 def get_computador_by_device_id(device_id):
     if not db_connection or not db_connection.is_connected():
-        return jsonify({"error": "Database connection not available"}), 500
+        # Tenta reconectar se a conexão caiu (básico)
+        logging.warning("Database connection lost. Attempting to re-establish.")
+        try:
+            init_db() # Tenta inicializar novamente
+            if not db_connection or not db_connection.is_connected():
+                return jsonify({"error": "Failed to re-establish database connection"}), 500
+        except Exception as e:
+            logging.error(f"Error during re-connection attempt: {e}")
+            return jsonify({"error": "Failed to re-establish database connection"}), 500
+
 
     cursor = db_connection.cursor(dictionary=True) # dictionary=True para obter resultados como dicionários
     try:
@@ -110,7 +121,15 @@ def get_computador_by_device_id(device_id):
 @app.route('/computadores/<string:device_id>', methods=['DELETE'])
 def delete_computador_by_device_id(device_id):
     if not db_connection or not db_connection.is_connected():
-        return jsonify({"error": "Database connection not available"}), 500
+        # Tenta reconectar se a conexão caiu (básico)
+        logging.warning("Database connection lost. Attempting to re-establish.")
+        try:
+            init_db() # Tenta inicializar novamente
+            if not db_connection or not db_connection.is_connected():
+                return jsonify({"error": "Failed to re-establish database connection"}), 500
+        except Exception as e:
+            logging.error(f"Error during re-connection attempt: {e}")
+            return jsonify({"error": "Failed to re-establish database connection"}), 500
 
     cursor = db_connection.cursor()
     try:
