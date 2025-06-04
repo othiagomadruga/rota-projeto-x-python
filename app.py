@@ -12,41 +12,6 @@ app = Flask(__name__)
 # Variável global para a conexão com o banco de dados
 db_connection = None
 
-def log_database_schema():
-    """
-    Função TEMPORÁRIA para logar o schema do banco de dados.
-    Esta função deve ser removida após a descoberta do schema.
-    """
-    if not db_connection or not db_connection.is_connected():
-        logging.error("Não foi possível logar o schema: Conexão com o DB não está ativa.")
-        return
-
-    cursor = db_connection.cursor()
-    try:
-        logging.info("--- Iniciando descoberta do schema do banco de dados ---")
-
-        # 1. Listar todas as tabelas
-        cursor.execute("SHOW TABLES;")
-        tables = cursor.fetchall()
-        logging.info(f"Tabelas encontradas: {tables}")
-
-        # 2. Para cada tabela, descrever suas colunas
-        for table_tuple in tables:
-            table_name = table_tuple[0]
-            logging.info(f"\n--- Descrevendo tabela: '{table_name}' ---")
-            cursor.execute(f"DESCRIBE `{table_name}`;")
-            columns = cursor.fetchall()
-            for col in columns:
-                logging.info(f"  Coluna: {col[0]}, Tipo: {col[1]}, Nulo: {col[2]}, Chave: {col[3]}, Padrão: {col[4]}, Extra: {col[5]}")
-
-        logging.info("--- Descoberta do schema concluída ---")
-
-    except mysql.connector.Error as err:
-        logging.error(f"Erro ao logar o schema do banco de dados: {err}")
-    finally:
-        cursor.close()
-
-
 def init_db():
     global db_connection
     db_url = os.getenv("DATABASE_URL")
@@ -89,8 +54,7 @@ def init_db():
         )
         if db_connection.is_connected():
             logging.info("Conectado ao banco de dados MySQL com sucesso!")
-            # CHAME A FUNÇÃO DE DESCOBERTA DO SCHEMA AQUI!
-            log_database_schema() # <--- NOVA LINHA ADICIONADA AQUI!
+            # log_database_schema() # <--- REMOVA OU COMENTE ESTA LINHA AGORA!
         else:
             logging.error("Falha ao conectar ao banco de dados: Conexão não estabelecida.")
             exit(1)
@@ -104,37 +68,77 @@ def init_db():
 # Inicia a conexão com o banco de dados quando o aplicativo começa
 init_db()
 
-# Rota GET para buscar um computador por device_id
-@app.route('/computadores/<string:device_id>', methods=['GET'])
-def get_computador_by_device_id(device_id):
+# --- Funções Auxiliares para Reusar o Código ---
+def _get_db_cursor():
+    """Retorna um cursor do banco de dados, tentando reconectar se necessário."""
     if not db_connection or not db_connection.is_connected():
         logging.warning("Database connection lost. Attempting to re-establish.")
         try:
             init_db()
             if not db_connection or not db_connection.is_connected():
-                return jsonify({"error": "Failed to re-establish database connection"}), 500
+                raise Exception("Failed to re-establish database connection")
         except Exception as e:
             logging.error(f"Error during re-connection attempt: {e}")
-            return jsonify({"error": "Failed to re-establish database connection"}), 500
+            raise
 
-    cursor = db_connection.cursor(dictionary=True)
+    return db_connection.cursor(dictionary=True) # dictionary=True para resultados como dicionários
+
+def _fetch_devices(query, params=None):
+    """Executa uma query e retorna múltiplos dispositivos."""
     try:
-        query = "SELECT device_id, nome, preco FROM computadores WHERE device_id = %s"
-        cursor.execute(query, (device_id,))
-        computador = cursor.fetchone()
-
-        if computador:
-            return jsonify(computador), 200
-        else:
-            return jsonify({"error": "Computador não encontrado"}), 404
-    except mysql.connector.Error as err:
-        logging.error(f"Erro ao buscar computador: {err}")
-        return jsonify({"error": "Erro ao buscar o computador"}), 500
+        cursor = _get_db_cursor()
+        cursor.execute(query, params)
+        devices = cursor.fetchall()
+        return jsonify(devices), 200
+    except Exception as e:
+        logging.error(f"Error fetching devices: {e}")
+        return jsonify({"error": "Erro ao buscar dispositivos"}), 500
     finally:
-        cursor.close()
+        if 'cursor' in locals() and cursor:
+            cursor.close()
 
-# Rota DELETE para deletar um computador por device_id
-@app.route('/computadores/<string:device_id>', methods=['DELETE'])
+def _fetch_single_device(query, params=None):
+    """Executa uma query e retorna um único dispositivo."""
+    try:
+        cursor = _get_db_cursor()
+        cursor.execute(query, params)
+        device = cursor.fetchone()
+        if device:
+            return jsonify(device), 200
+        else:
+            return jsonify({"error": "Dispositivo não encontrado"}), 404
+    except Exception as e:
+        logging.error(f"Error fetching single device: {e}")
+        return jsonify({"error": "Erro ao buscar o dispositivo"}), 500
+    finally:
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+
+# --- ROTAS DA API ---
+
+# Rota para pegar todos os dispositivos
+@app.route('/desktop', methods=['GET'])
+def get_all_devices():
+    query = "SELECT id, hostname, equipment_name, os, os_version, location, manufacturer, model FROM devices"
+    return _fetch_devices(query)
+
+# Rota para pegar todos os dispositivos por plataforma
+@app.route('/desktop/<string:platform>', methods=['GET'])
+def get_devices_by_platform(platform):
+    # Garante que a plataforma está em lowercase para comparação (se o DB for case-insensitive)
+    # ou ajuste para corresponder exatamente como está no seu DB.
+    # Ex: 'windows', 'macos', 'linux'
+    query = "SELECT id, hostname, equipment_name, os, os_version, location, manufacturer, model FROM devices WHERE os = %s"
+    return _fetch_devices(query, (platform.lower(),)) # Convertendo para lowercase para a query
+
+# Rota para pegar um dispositivo específico por ID e plataforma
+@app.route('/desktop/<string:platform>/<int:device_id>', methods=['GET'])
+def get_specific_device_by_platform_and_id(platform, device_id):
+    query = "SELECT id, hostname, equipment_name, os, os_version, location, manufacturer, model FROM devices WHERE os = %s AND id = %s"
+    return _fetch_single_device(query, (platform.lower(), device_id)) # Convertendo para lowercase para a query
+
+# Rota DELETE para deletar um computador por ID (usando o 'id' da tabela 'devices')
+@app.route('/computadores/<int:device_id>', methods=['DELETE'])
 def delete_computador_by_device_id(device_id):
     if not db_connection or not db_connection.is_connected():
         logging.warning("Database connection lost. Attempting to re-establish.")
@@ -148,18 +152,18 @@ def delete_computador_by_device_id(device_id):
 
     cursor = db_connection.cursor()
     try:
-        query = "DELETE FROM computadores WHERE device_id = %s"
+        query = "DELETE FROM devices WHERE id = %s" # <--- ALTERADO PARA USAR 'id' DA TABELA 'devices'
         cursor.execute(query, (device_id,))
         db_connection.commit()
 
         if cursor.rowcount > 0:
-            return jsonify({"message": "Computador deletado com sucesso"}), 200
+            return jsonify({"message": f"Dispositivo {device_id} deletado com sucesso"}), 200
         else:
-            return jsonify({"error": "Computador não encontrado para deletar"}), 404
+            return jsonify({"error": f"Dispositivo {device_id} não encontrado para deletar"}), 404
     except mysql.connector.Error as err:
-        logging.error(f"Erro ao deletar computador: {err}")
+        logging.error(f"Erro ao deletar dispositivo: {err}")
         db_connection.rollback()
-        return jsonify({"error": "Erro ao deletar o computador"}), 500
+        return jsonify({"error": "Erro ao deletar o dispositivo"}), 500
     finally:
         cursor.close()
 
